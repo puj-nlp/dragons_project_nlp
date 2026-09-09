@@ -1,0 +1,48 @@
+services:
+  mongo:
+    image: mongo:7
+    container_name: dragons-services-mongo
+    restart: unless-stopped
+    ports:
+      - "50030:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME:-root}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD:-dragons_dev_password}
+    volumes:
+      - mongo_data:/data/db
+      - ./init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet -u \"$${MONGO_INITDB_ROOT_USERNAME}\" -p \"$${MONGO_INITDB_ROOT_PASSWORD}\" --authenticationDatabase admin --eval \"db.adminCommand('ping').ok\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      dragons-services-docker-network:
+        aliases:
+          - dragons-mongo
+
+  mongo-express:
+    image: mongo-express:latest
+    container_name: dragons-services-mongo-express
+    restart: unless-stopped
+    ports:
+      - "50031:8081"
+    environment:
+      ME_CONFIG_BASICAUTH_USERNAME: ${ME_CONFIG_BASICAUTH_USERNAME:-admin}
+      ME_CONFIG_BASICAUTH_PASSWORD: ${ME_CONFIG_BASICAUTH_PASSWORD:-developer}
+      ME_CONFIG_MONGODB_URL: mongodb://${MONGO_INITDB_ROOT_USERNAME:-root}:${MONGO_INITDB_ROOT_PASSWORD:-dragons_dev_password}@mongo:27017/?authSource=admin
+    depends_on:
+      mongo:
+        condition: service_healthy
+    networks:
+      dragons-services-docker-network:
+        aliases:
+          - dragons-mongo-express
+
+volumes:
+  mongo_data:
+
+networks:
+  dragons-services-docker-network:
+    name: dragons-services-docker-network
+    external: true

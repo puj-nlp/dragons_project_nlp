@@ -1,0 +1,17 @@
+services:
+  netkeeper:
+    image: alpine:3.20
+    container_name: dragons-services-network-keeper
+    command: ["sh", "-c", "tail -f /dev/null"]
+    restart: unless-stopped
+    networks:
+      - dragons-services-docker-network
+
+networks:
+  dragons-services-docker-network:
+    name: dragons-services-docker-network
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${DRAGONS_DOCKER_NETWORK_SUBNET:-10.188.0.0/24}
+          gateway: ${DRAGONS_DOCKER_NETWORK_GATEWAY:-10.188.0.1}

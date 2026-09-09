@@ -1,0 +1,51 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: dragons-services-postgres
+    restart: unless-stopped
+    ports:
+      - "50020:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-dragons}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dragons_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-dragons}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      dragons-services-docker-network:
+        aliases:
+          - dragons-postgres
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: dragons-services-pgadmin
+    user: root
+    restart: unless-stopped
+    ports:
+      - "50021:80"
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL:-admin@dragons.local}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD:-developer}
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      dragons-services-docker-network:
+        aliases:
+          - dragons-pgadmin
+
+volumes:
+  postgres_data:
+  pgadmin_data:
+
+networks:
+  dragons-services-docker-network:
+    name: dragons-services-docker-network
+    external: true
