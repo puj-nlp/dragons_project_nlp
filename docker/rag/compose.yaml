@@ -1,0 +1,346 @@
+services:
+  anythingllm:
+    image: mintplexlabs/anythingllm:latest
+    container_name: dragons-rag-anythingllm
+    restart: unless-stopped
+    ports:
+      - "50050:3001"
+    cap_add:
+      - SYS_ADMIN
+    environment:
+      STORAGE_DIR: /app/server/storage
+      JWT_SECRET: ${ANYTHINGLLM_JWT_SECRET:-change-this-anythingllm-jwt-secret}
+      JWT_EXPIRY: ${ANYTHINGLLM_JWT_EXPIRY:-30d}
+      LLM_PROVIDER: ollama
+      OLLAMA_BASE_PATH: http://dragons-rag-ollama:11434
+      OLLAMA_MODEL_PREF: ${OLLAMA_MODEL_PREF:-qwen3:4b}
+      OLLAMA_MODEL_TOKEN_LIMIT: ${OLLAMA_MODEL_TOKEN_LIMIT:-4096}
+      OLLAMA_RESPONSE_TIMEOUT: ${OLLAMA_RESPONSE_TIMEOUT:-7200000}
+      EMBEDDING_ENGINE: ollama
+      EMBEDDING_BASE_PATH: http://dragons-rag-ollama:11434
+      EMBEDDING_MODEL_PREF: ${EMBEDDING_MODEL_PREF:-nomic-embed-text}
+      EMBEDDING_MODEL_MAX_CHUNK_LENGTH: ${EMBEDDING_MODEL_MAX_CHUNK_LENGTH:-8192}
+      VECTOR_DB: milvus
+      MILVUS_ADDRESS: http://dragons-rag-milvus-proxy:19530
+      MILVUS_USERNAME: ""
+      MILVUS_PASSWORD: ""
+    volumes:
+      - anythingllm_data:/app/server/storage
+    depends_on:
+      ollama:
+        condition: service_started
+      milvus-proxy:
+        condition: service_healthy
+    networks:
+      dragons-services-docker-network:
+        aliases:
+          - dragons-rag-anythingllm
+
+  ollama:
+    image: ollama/ollama:0.24.0
+    container_name: dragons-rag-ollama
+    restart: unless-stopped
+    ports:
+      - "50051:11434"
+    environment:
+      OLLAMA_HOST: 0.0.0.0:11434
+      OLLAMA_NUM_PARALLEL: "1"
+      OLLAMA_MAX_LOADED_MODELS: "1"
+      OLLAMA_KEEP_ALIVE: 5m
+      OLLAMA_MAX_QUEUE: "10"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      dragons-services-docker-network:
+        aliases:
+          - dragons-rag-ollama
+
+  ollama-init:
+    image: ollama/ollama:0.24.0
+    container_name: dragons-rag-ollama-init
+    restart: "no"
+    environment:
+      OLLAMA_HOST: http://dragons-rag-ollama:11434
+      OLLAMA_MODEL_PREF: ${OLLAMA_MODEL_PREF:-qwen3:4b}
+      EMBEDDING_MODEL_PREF: ${EMBEDDING_MODEL_PREF:-nomic-embed-text}
+    command: >
+      sh -c '
+        until ollama list >/dev/null 2>&1; do sleep 3; done;
+        for model in "$$OLLAMA_MODEL_PREF" "$$EMBEDDING_MODEL_PREF"; do
+          ollama pull "$$model" || exit 1;
+        done
+      '
+    depends_on:
+      - ollama
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      dragons-services-docker-network:
+        aliases:
+          - dragons-rag-ollama-init
+
+  openwebui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: dragons-rag-openwebui
+    restart: unless-stopped
+    ports:
+      - "50052:8080"
+    environment:
+      OLLAMA_BASE_URL: http://dragons-rag-ollama:11434
+      OLLAMA_API_BASE_URL: http://dragons-rag-ollama:11434
+      WEBUI_SECRET_KEY: ${OPENWEBUI_SECRET_KEY:-change-this-openwebui-secret-key}
+      WEBUI_AUTH: ${OPENWEBUI_AUTH:-False}
+      ENABLE_OPENAI_API: "False"
+      ENV: dev
+    volumes:
+      - openwebui_data:/app/backend/data
+    depends_on:
+      - ollama
+    networks:
+      dragons-services-docker-network:
+        aliases:
+          - dragons-rag-openwebui
+
+  milvus-etcd:
+    image: quay.io/coreos/etcd:v3.5.25
+    container_name: dragons-rag-milvus-etcd
+    restart: unless-stopped
+    environment:
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+      ETCD_SNAPSHOT_COUNT: "50000"
+    command: >
+      etcd
+      -advertise-client-urls=http://dragons-rag-milvus-etcd:2379
+      -listen-client-urls http://0.0.0.0:2379
+      --data-dir /etcd
+    volumes:
+      - milvus_etcd_data:/etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    networks:
+      dragons-services-docker-network:
+        aliases:
+          - dragons-rag-milvus-etcd
+
+  milvus-minio:
+    image: minio/minio:RELEASE.2024-05-28T17-19-04Z
+    container_name: dragons-rag-milvus-minio
+    restart: unless-stopped
+    ports:
+      - "50053:9001"
+      - "50054:9000"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    command: minio server /minio_data --console-address ":9001"
+    volumes:
+      - milvus_minio_data:/minio_data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    networks:
+      dragons-services-docker-network:
+        aliases:
+          - dragons-rag-milvus-minio
+
+  milvus-pulsar:
+    image: apachepulsar/pulsar:2.8.2
+    container_name: dragons-rag-milvus-pulsar
+    restart: unless-stopped
+    environment:
+      nettyMaxFrameSizeBytes: "104867840"
+      defaultRetentionTimeInMinutes: "10080"
+      defaultRetentionSizeInMB: "8192"
+      PULSAR_PREFIX_maxMessageSize: "104857600"
+      PULSAR_GC: -XX:+UseG1GC
+    command: >
+      bash -c "
+        bin/apply-config-from-env.py conf/standalone.conf &&
+        exec bin/pulsar standalone --no-functions-worker --no-stream-storage
+      "
+    volumes:
+      - milvus_pulsar_data:/pulsar/data
+      - milvus_pulsar_conf:/pulsar/conf
+    healthcheck:
+      test: ["CMD-SHELL", "bin/pulsar-admin brokers healthcheck || exit 1"]
+      interval: 30s
+      timeout: 20s
+      retries: 10
+      start_period: 60s
+    networks:
+      dragons-services-docker-network:
+        aliases:
+          - dragons-rag-milvus-pulsar
+
+  milvus-rootcoord:
+    image: milvusdb/milvus:v2.2.6
+    container_name: dragons-rag-milvus-rootcoord
+    restart: unless-stopped
+    command: ["milvus", "run", "rootcoord"]
+    environment: &milvus-env
+      ETCD_ENDPOINTS: dragons-rag-milvus-etcd:2379
+      MINIO_ADDRESS: dragons-rag-milvus-minio:9000
+      MINIO_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      PULSAR_ADDRESS: pulsar://dragons-rag-milvus-pulsar:6650
+    depends_on:
+      milvus-etcd:
+        condition: service_healthy
+      milvus-minio:
+        condition: service_healthy
+      milvus-pulsar:
+        condition: service_healthy
+    networks:
+      dragons-services-docker-network:
+        aliases:
+          - dragons-rag-milvus-rootcoord
+
+  milvus-querycoord:
+    image: milvusdb/milvus:v2.2.6
+    container_name: dragons-rag-milvus-querycoord
+    restart: unless-stopped
+    command: ["milvus", "run", "querycoord"]
+    environment: *milvus-env
+    depends_on:
+      - milvus-rootcoord
+    networks:
+      dragons-services-docker-network:
+        aliases:
+          - dragons-rag-milvus-querycoord
+
+  milvus-indexcoord:
+    image: milvusdb/milvus:v2.2.6
+    container_name: dragons-rag-milvus-indexcoord
+    restart: unless-stopped
+    command: ["milvus", "run", "indexcoord"]
+    environment: *milvus-env
+    depends_on:
+      - milvus-rootcoord
+    networks:
+      dragons-services-docker-network:
+        aliases:
+          - dragons-rag-milvus-indexcoord
+
+  milvus-datacoord:
+    image: milvusdb/milvus:v2.2.6
+    container_name: dragons-rag-milvus-datacoord
+    restart: unless-stopped
+    command: ["milvus", "run", "datacoord"]
+    environment: *milvus-env
+    depends_on:
+      - milvus-rootcoord
+    networks:
+      dragons-services-docker-network:
+        aliases:
+          - dragons-rag-milvus-datacoord
+
+  milvus-querynode:
+    image: milvusdb/milvus:v2.2.6
+    container_name: dragons-rag-milvus-querynode
+    restart: unless-stopped
+    command: ["milvus", "run", "querynode"]
+    environment: *milvus-env
+    depends_on:
+      - milvus-querycoord
+    networks:
+      dragons-services-docker-network:
+        aliases:
+          - dragons-rag-milvus-querynode
+
+  milvus-indexnode:
+    image: milvusdb/milvus:v2.2.6
+    container_name: dragons-rag-milvus-indexnode
+    restart: unless-stopped
+    command: ["milvus", "run", "indexnode"]
+    environment: *milvus-env
+    depends_on:
+      - milvus-indexcoord
+    networks:
+      dragons-services-docker-network:
+        aliases:
+          - dragons-rag-milvus-indexnode
+
+  milvus-datanode:
+    image: milvusdb/milvus:v2.2.6
+    container_name: dragons-rag-milvus-datanode
+    restart: unless-stopped
+    command: ["milvus", "run", "datanode"]
+    environment: *milvus-env
+    depends_on:
+      - milvus-datacoord
+    volumes:
+      - milvus_data:/var/lib/milvus
+    networks:
+      dragons-services-docker-network:
+        aliases:
+          - dragons-rag-milvus-datanode
+
+  milvus-proxy:
+    image: milvusdb/milvus:v2.2.6
+    container_name: dragons-rag-milvus-proxy
+    restart: unless-stopped
+    command: ["milvus", "run", "proxy"]
+    ports:
+      - "50055:19530"
+      - "50056:9091"
+    environment: *milvus-env
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      start_period: 180s
+      timeout: 20s
+      retries: 10
+    depends_on:
+      - milvus-rootcoord
+      - milvus-querycoord
+      - milvus-indexcoord
+      - milvus-datacoord
+      - milvus-querynode
+      - milvus-indexnode
+      - milvus-datanode
+    networks:
+      dragons-services-docker-network:
+        aliases:
+          - dragons-rag-milvus-proxy
+
+  attu:
+    image: zilliz/attu:v2.4
+    container_name: dragons-rag-attu
+    restart: unless-stopped
+    ports:
+      - "50057:3000"
+    environment:
+      MILVUS_URL: dragons-rag-milvus-proxy:19530
+      MILVUS_ADDRESS: dragons-rag-milvus-proxy:19530
+    volumes:
+      - attu_data:/data
+    depends_on:
+      milvus-proxy:
+        condition: service_healthy
+    networks:
+      dragons-services-docker-network:
+        aliases:
+          - dragons-rag-attu
+
+volumes:
+  anythingllm_data:
+  ollama_data:
+  openwebui_data:
+  milvus_etcd_data:
+  milvus_minio_data:
+  milvus_pulsar_data:
+  milvus_pulsar_conf:
+  milvus_data:
+  attu_data:
+
+networks:
+  dragons-services-docker-network:
+    name: dragons-services-docker-network
+    external: true
