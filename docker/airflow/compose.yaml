@@ -1,0 +1,210 @@
+services:
+  airflow-fs-setup:
+    image: alpine:3.20
+    container_name: dragons-services-airflow-fs-setup
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-lc"]
+    command: |
+      set -e
+      : "$${AIRFLOW_UID:=50000}"
+      : "$${AIRFLOW_GID:=0}"
+      for d in /opt/airflow/dags /opt/airflow/logs /opt/airflow/plugins /opt/airflow/config; do
+        mkdir -p "$$d"
+        chown -R "$${AIRFLOW_UID}:$${AIRFLOW_GID}" "$$d"
+        chmod -R ug+rwX "$$d"
+      done
+    environment:
+      AIRFLOW_UID: ${AIRFLOW_UID:-50000}
+      AIRFLOW_GID: ${AIRFLOW_GID:-0}
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - airflow_logs:/opt/airflow/logs
+      - ./plugins:/opt/airflow/plugins
+      - ./config:/opt/airflow/config
+    networks:
+      - dragons-services-docker-network
+    restart: "no"
+
+  airflow-postgres:
+    image: postgres:16
+    container_name: dragons-services-airflow-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - airflow_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow -d airflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      dragons-services-docker-network:
+        aliases:
+          - dragons-airflow-postgres
+
+  airflow-redis:
+    image: redis:7-alpine
+    container_name: dragons-services-airflow-redis
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      dragons-services-docker-network:
+        aliases:
+          - dragons-airflow-redis
+
+  airflow-init:
+    image: apache/airflow:2.10.5
+    container_name: dragons-services-airflow-init
+    restart: "no"
+    user: "${AIRFLOW_UID:-50000}:0"
+    environment: &airflow-common-env
+      AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres/airflow
+      AIRFLOW__CELERY__BROKER_URL: redis://airflow-redis:6379/0
+      AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow@airflow-postgres/airflow
+      AIRFLOW__CORE__FERNET_KEY: ""
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session
+      _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-}
+    command: >
+      bash -c "
+        airflow db migrate &&
+        airflow users create
+          --username ${AIRFLOW_ADMIN_USER:-admin}
+          --password ${AIRFLOW_ADMIN_PASSWORD:-admin}
+          --firstname ${AIRFLOW_ADMIN_FIRSTNAME:-Dragons}
+          --lastname ${AIRFLOW_ADMIN_LASTNAME:-Admin}
+          --role Admin
+          --email ${AIRFLOW_ADMIN_EMAIL:-admin@dragons.local} || true
+      "
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - airflow_logs:/opt/airflow/logs
+      - ./plugins:/opt/airflow/plugins
+      - ./config:/opt/airflow/config
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+      airflow-redis:
+        condition: service_healthy
+      airflow-fs-setup:
+        condition: service_completed_successfully
+    networks:
+      - dragons-services-docker-network
+
+  airflow-webserver:
+    image: apache/airflow:2.10.5
+    container_name: dragons-services-airflow-webserver
+    restart: unless-stopped
+    user: "${AIRFLOW_UID:-50000}:0"
+    ports:
+      - "50010:8080"
+    environment: *airflow-common-env
+    command: webserver
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail http://localhost:8080/health || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - airflow_logs:/opt/airflow/logs
+      - ./plugins:/opt/airflow/plugins
+      - ./config:/opt/airflow/config
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    networks:
+      dragons-services-docker-network:
+        aliases:
+          - dragons-airflow-webserver
+
+  airflow-scheduler:
+    image: apache/airflow:2.10.5
+    container_name: dragons-services-airflow-scheduler
+    restart: unless-stopped
+    user: "${AIRFLOW_UID:-50000}:0"
+    environment: *airflow-common-env
+    command: scheduler
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - airflow_logs:/opt/airflow/logs
+      - ./plugins:/opt/airflow/plugins
+      - ./config:/opt/airflow/config
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    networks:
+      - dragons-services-docker-network
+
+  airflow-worker:
+    image: apache/airflow:2.10.5
+    container_name: dragons-services-airflow-worker
+    restart: unless-stopped
+    user: "${AIRFLOW_UID:-50000}:0"
+    environment: *airflow-common-env
+    command: celery worker
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - airflow_logs:/opt/airflow/logs
+      - ./plugins:/opt/airflow/plugins
+      - ./config:/opt/airflow/config
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    networks:
+      - dragons-services-docker-network
+
+  airflow-triggerer:
+    image: apache/airflow:2.10.5
+    container_name: dragons-services-airflow-triggerer
+    restart: unless-stopped
+    user: "${AIRFLOW_UID:-50000}:0"
+    environment: *airflow-common-env
+    command: triggerer
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - airflow_logs:/opt/airflow/logs
+      - ./plugins:/opt/airflow/plugins
+      - ./config:/opt/airflow/config
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    networks:
+      - dragons-services-docker-network
+
+  flower:
+    image: apache/airflow:2.10.5
+    container_name: dragons-services-airflow-flower
+    restart: unless-stopped
+    user: "${AIRFLOW_UID:-50000}:0"
+    ports:
+      - "50011:5555"
+    environment: *airflow-common-env
+    command: celery flower
+    depends_on:
+      airflow-worker:
+        condition: service_started
+    networks:
+      dragons-services-docker-network:
+        aliases:
+          - dragons-airflow-flower
+
+volumes:
+  airflow_pgdata:
+  airflow_logs:
+
+networks:
+  dragons-services-docker-network:
+    name: dragons-services-docker-network
+    external: true

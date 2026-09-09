@@ -1,0 +1,56 @@
+http://dragons.local {
+	encode zstd gzip
+
+	handle /health {
+		respond "ok" 200
+	}
+
+	handle {
+		respond "dragons services gateway" 200
+	}
+}
+
+http://airflow.dragons.local {
+	encode zstd gzip
+	reverse_proxy dragons-airflow-webserver:8080
+}
+
+http://flower.dragons.local {
+	encode zstd gzip
+	reverse_proxy dragons-airflow-flower:5555
+}
+
+http://pgadmin.dragons.local {
+	encode zstd gzip
+	reverse_proxy dragons-pgadmin:80
+}
+
+http://mongo.dragons.local {
+	encode zstd gzip
+	reverse_proxy dragons-mongo-express:8081
+}
+
+http://metabase.dragons.local {
+	encode zstd gzip
+	reverse_proxy dragons-metabase:3000
+}
+
+http://rag.dragons.local {
+	encode zstd gzip
+	reverse_proxy dragons-rag-anythingllm:3001
+}
+
+http://webui.dragons.local {
+	encode zstd gzip
+	reverse_proxy dragons-rag-openwebui:8080
+}
+
+http://attu.dragons.local {
+	encode zstd gzip
+	reverse_proxy dragons-rag-attu:3000
+}
+
+http://minio.dragons.local {
+	encode zstd gzip
+	reverse_proxy dragons-rag-milvus-minio:9001
+}

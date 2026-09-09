@@ -1,0 +1,24 @@
+services:
+  caddy:
+    image: caddy:2
+    container_name: dragons-services-caddy
+    restart: unless-stopped
+    ports:
+      - "50080:80"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      dragons-services-docker-network:
+        aliases:
+          - dragons-caddy
+
+volumes:
+  caddy_data:
+  caddy_config:
+
+networks:
+  dragons-services-docker-network:
+    name: dragons-services-docker-network
+    external: true
